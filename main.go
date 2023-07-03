@@ -36,20 +36,6 @@ import (
 	"github.com/go-yaml/yaml"
 )
 
-type labels struct {
-	TaskArn       string `yaml:"task_arn"`
-	TaskName      string `yaml:"task_name"`
-	JobName       string `yaml:"job,omitempty"`
-	TaskRevision  string `yaml:"task_revision"`
-	TaskGroup     string `yaml:"task_group"`
-	ClusterArn    string `yaml:"cluster_arn"`
-	ContainerName string `yaml:"container_name"`
-	ContainerArn  string `yaml:"container_arn"`
-	DockerImage   string `yaml:"docker_image"`
-	MetricsPath   string `yaml:"__metrics_path__,omitempty"`
-	Scheme        string `yaml:"__scheme__,omitempty"`
-}
-
 // Docker label for enabling dynamic port detection
 const dynamicPortLabel = "PROMETHEUS_DYNAMIC_EXPORT"
 
@@ -60,11 +46,12 @@ var times = flag.Int("config.scrape-times", 0, "how many times to scrape before 
 var roleArn = flag.String("config.role-arn", "", "ARN of the role to assume when scraping the AWS API (optional)")
 var prometheusPortLabel = flag.String("config.port-label", "PROMETHEUS_EXPORTER_PORT", "Docker label to define the scrape port of the application (if missing an application won't be scraped)")
 var prometheusPathLabel = flag.String("config.path-label", "PROMETHEUS_EXPORTER_PATH", "Docker label to define the scrape path of the application")
-var prometheusSchemeLabel= flag.String("config.scheme-label", "PROMETHEUS_EXPORTER_SCHEME", "Docker label to define the scheme of the target application")
+var prometheusSchemeLabel = flag.String("config.scheme-label", "PROMETHEUS_EXPORTER_SCHEME", "Docker label to define the scheme of the target application")
 var prometheusFilterLabel = flag.String("config.filter-label", "", "Docker label (and optionally value) to require to scrape the application")
 var prometheusServerNameLabel = flag.String("config.server-name-label", "PROMETHEUS_EXPORTER_SERVER_NAME", "Docker label to define the server name")
 var prometheusJobNameLabel = flag.String("config.job-name-label", "PROMETHEUS_EXPORTER_JOB_NAME", "Docker label to define the job name")
 var prometheusDynamicPortDetection = flag.Bool("config.dynamic-port-detection", false, fmt.Sprintf("If true, only tasks with the Docker label %s=1 will be scraped", dynamicPortLabel))
+var prometheusEnvVars = flag.String("config.env-vars", "", "Docker env variables to expose if they exist (multiple values can be specified, separated by ',')")
 
 // logError is a convenience function that decodes all possible ECS
 // errors and displays them to standard error.
@@ -120,8 +107,8 @@ type PrometheusContainer struct {
 // PrometheusTaskInfo is the final structure that will be
 // output as a Prometheus file service discovery config.
 type PrometheusTaskInfo struct {
-	Targets []string `yaml:"targets"`
-	Labels  labels   `yaml:"labels"`
+	Targets []string          `yaml:"targets"`
+	Labels  map[string]string `yaml:"labels"`
 }
 
 // ExporterInformation returns a list of []*PrometheusTaskInfo
@@ -278,26 +265,37 @@ func (t *AugmentedTask) ExporterInformation() []*PrometheusTaskInfo {
 			host = ip
 		}
 
-		labels := labels{
-			TaskArn:       *t.TaskArn,
-			TaskName:      *t.TaskDefinition.Family,
-			JobName:       d.DockerLabels[*prometheusJobNameLabel],
-			TaskRevision:  fmt.Sprintf("%d", t.TaskDefinition.Revision),
-			TaskGroup:     *t.Group,
-			ClusterArn:    *t.ClusterArn,
-			ContainerName: *i.Name,
-			ContainerArn:  *i.ContainerArn,
-			DockerImage:   *d.Image,
+		labels := map[string]string{
+			"task_arn":       *t.TaskArn,
+			"task_name":      *t.TaskDefinition.Family,
+			"task_group":     *t.Group,
+			"cluster_arn":    *t.ClusterArn,
+			"container_name": *i.Name,
+			"container_arn":  *i.ContainerArn,
+			"docker_image":   *d.Image,
+		}
+
+		if jobName := d.DockerLabels[*prometheusJobNameLabel]; jobName != "" {
+			labels["job"] = jobName
 		}
 
 		exporterPath, ok = d.DockerLabels[*prometheusPathLabel]
 		if ok {
-			labels.MetricsPath = exporterPath
+			labels["__metrics_path__"] = exporterPath
+		}
+
+		envVars := strings.Split(*prometheusEnvVars, ",")
+		for _, envVar := range envVars {
+			for _, keyPair := range d.Environment {
+				if *keyPair.Name == envVar {
+					labels[envVar] = *keyPair.Value
+				}
+			}
 		}
 
 		scheme, ok = d.DockerLabels[*prometheusSchemeLabel]
 		if ok {
-		    labels.Scheme = scheme
+			labels["scheme"] = scheme
 		}
 
 		ret = append(ret, &PrometheusTaskInfo{
